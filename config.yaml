@@ -1,0 +1,27 @@
+# ============== Config file for running the SSP cfDNA Processing pipeline ====================
+
+
+# Path to the fastq directory: this is where seq data is accessed via symlink  
+DATA:
+    "data/"
+
+# Path to the output directory.
+RESULTS:
+    "results/"
+
+# Sample names for SSP data fastqs. 
+SAMPLES:
+  - "Sample_1_Prefix"
+  - "Sample_2_Prefix"
+  - "Sample_3_Prefix"
+  - "Sample_4_Prefix"
+  - "Sample_5_Prefix"
+  - "Sample_6_Prefix"
+  - "Sample_7_Prefix"
+  - "Sample_8_Prefix"
+
+GENOME:
+  - "path_to_bowtie2_index"
+
+SCRIPTS:
+  "code/"

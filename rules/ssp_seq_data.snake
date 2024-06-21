@@ -1,0 +1,169 @@
+# ===== Snakemake rules for running cfDNA SSP Library Processing pipeline ===============
+
+
+# Function to retrieve fastq paths
+def _get_fqs(wildcards):
+
+    fq_sfx = ["_1.fq.gz", "_2.fq.gz"] #This may need to be edited based on the suffix of your files (*.fq.gz versus *.fastq.gz)
+
+    def _get_paths(sample, suffix):
+        fq_path = os.path.join(DATA, sample + "*" + suffix)
+        fq_path = glob.glob(os.path.abspath(fq_path))
+
+        if len(fq_path) > 1:
+            sys.exit("ERROR: Multiple fastqs start with the prefix " + sample + ".") 
+
+        if not fq_path:
+            sys.exit("ERROR: No fastqs found for " + sample + ".")
+
+        return fq_path[0]
+
+    return [_get_paths(wildcards.sample, x) for x in fq_sfx]
+
+# Run processing steps  =========================================================
+# 2 trim steps: 
+# 1. trim off adapter sequences
+# 2. trim if read length is > 130bp in case some adapter sequence remains 
+
+rule cutadapt:
+    input:
+        _get_fqs
+    output:
+        r1_1 = "{results}/{sample}/{sample}_R1_trim1.fastq.gz",
+        r2_1 = "{results}/{sample}/{sample}_R2_trim1.fastq.gz",
+        r1_2 = "{results}/{sample}/{sample}_R1_trim2.fastq.gz",
+        r2_2 = "{results}/{sample}/{sample}_R2_trim2.fastq.gz"
+    params:
+        job_name = "{sample}_cutadapt",
+        memory   = "select[mem>8] rusage[mem=8]",
+        len      = 130,
+        m_len    = 35
+    log:
+        "{results}/logs/{sample}_cutadapt"
+    threads:
+        1
+    shell:
+        """
+        # Trim adapter sequences off reads
+        cutadapt -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC  -A AGATCGGAAGAGCGTCGTGTAGGGAAAGA -o {output.r1_1}  -p {output.r2_1}  {input[0]}  {input[1]}
+        
+        #if read length <= 130, no trimming
+        cutadapt  --pair-filter=both  -l {params.len}  -m {params.m_len}  -o {output.r1_2}  -p {output.r2_2}  {output.r1_1}  {output.r2_1}
+        """
+
+# Alignments to specified genomes in config.yaml
+rule bowtie2:
+    input:
+        r1_2 = "{results}/{sample}/{sample}_R1_trim2.fastq.gz",
+        r2_2 = "{results}/{sample}/{sample}_R2_trim2.fastq.gz"
+    output:
+        sam = temp("{results}/{sample}/{sample}.sam"),
+    params:
+        job_name = "bowtie2",
+        memory   = "select[mem>8] rusage[mem=8]",
+        genome   = lambda wildcards: GENOME[wildcards.sample],
+        unaligned = "{results}/{sample}/UNaligned_{sample}.fq.gz"
+    log:
+        "{results}/logs/{sample}_bowtie2"
+    threads:
+        16
+    shell:
+        """
+        bowtie2  --local --very-sensitive-local  --no-unal --no-mixed  --no-discordant  -I 10  -X 500  --threads {threads}  -x {params.genome}  -1 {input.r1_2}  -2 {input.r2_2} > {output.sam}  
+        """
+rule post_align:
+    input:
+        sam = "{results}/{sample}/{sample}.sam"
+    output:
+        bam = "{results}/{sample}/{sample}.bam",
+        bedpe = temp("{results}/{sample}/{sample}.bed")
+    params:
+        job_name = "post_align",
+        memory   = "select[mem>8] rusage[mem=8]",
+    log:
+        "{results}/logs/{sample}_post_align"
+    threads:
+        1
+    shell:
+        """
+        samtools sort -n {input.sam} -o {output.bam}
+
+        samtools view -bf 0x2 {output.bam} | bedtools bamtobed  -i stdin -bedpe > {output.bedpe}
+        """
+
+# Create bed files for paired-end reads
+# Create pe.bed files using perl script that has chr no., chr START, chr END, fragment lengths 
+rule pebeds:
+    input:
+        "{results}/{sample}/{sample}.bed"
+    output:
+        temp("{results}/{sample}/{sample}_pe.bed")
+    params:
+        job_name = "bedpe2bed",
+        memory   = "select[mem>8] rusage[mem=8]",
+        scripts = SCRIPTS 
+    log:
+        "{results}/logs/{sample}_pebed"
+    threads:
+        1
+    shell:
+        """
+        perl {params.scripts}/bedpe2bed.pl {input} 2000 > {output}
+        """
+
+rule length_files:
+    input:
+        "{results}/{sample}/{sample}_pe.bed"
+    output:
+        braw = "{results}/{sample}/{sample}_braw.len",
+        bnorm = "{results}/{sample}/{sample}_bnorm.len"
+    params:
+        job_name = "len",
+        memory   = "select[mem>8] rusage[mem=8]",
+    log:
+        "{results}/logs/{sample}_len"
+    threads:
+        1
+    shell:
+        """
+        awk  '{{print $4}}' {input}  | sort -n  | uniq -c  | awk '{{print $2,$1}}'  > {output.braw}
+        
+        len=`cat {input} | wc -l`
+        awk  -v len=$len  '{{print $1,$2/len}}'  {output.braw}  > {output.bnorm}
+        """
+
+rule zip_beds:
+    input:
+        "{results}/{sample}/{sample}_pe.bed"
+    output:
+        "{results}/{sample}/{sample}_pe.bed.gz"
+    params:
+        job_name = "gzip",
+        memory   = "select[mem>8] rusage[mem=8]",
+    log:
+        "{results}/logs/{sample}_bed_gz"
+    threads:
+        1
+    shell:
+        """
+        gzip -c {input} > {output}
+        """
+
+rule uniq_beds:
+    input:
+        "{results}/{sample}/{sample}_pe.bed.gz"
+    output:
+        "{results}/{sample}/{sample}_uniq_pe.bed.gz"
+    params:
+        job_name = "uniq_bed",
+        memory   = "rusage[mem=250]",
+        scripts = SCRIPTS
+    log:
+        "{results}/logs/{sample}_uniq_bed"
+    threads:
+        1
+    shell:
+        """
+        perl {params.scripts}/uniq_STDOUT.pl {input} | gzip > {output}
+        """
+
